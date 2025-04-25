@@ -1,3 +1,0 @@
-
-
--running llms in local using python-ollama to translate srt files : https://github.com/ollama/ollama-python

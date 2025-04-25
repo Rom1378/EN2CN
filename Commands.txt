@@ -1,0 +1,2 @@
+# Download mp4 + srt
+ yt-dlp --write-auto-subs --sub-lang en --convert-subs srt --format "best[height<=720]" --merge-output-format mp4 "https://www.youtube.com/watch?v=_-oLhjM7y4Q"
