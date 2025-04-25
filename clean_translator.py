@@ -7,7 +7,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 # Configuration
-MODEL = "llama3.2"  # The model to use
+MODEL = "llama3.2"
 LANGUAGE = "French"  # Target language
 INPUT_DIR = "tmpInput"
 OUTPUT_DIR = "tmpOutput"
