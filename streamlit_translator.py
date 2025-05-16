@@ -10,6 +10,7 @@ import logging
 import shutil
 import google.generativeai as genai
 from abc import ABC, abstractmethod
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -426,6 +427,139 @@ def display_srt_side_by_side(content, translated_content):
         cols[1].markdown(f"<div style='white-space: pre-wrap; color: #2b9348'>{trans.group(4).strip()}</div>", unsafe_allow_html=True)
         st.markdown("---")
 
+def create_subtitle_json(srt_content):
+    """Convert SRT content to JSON format for the video player"""
+    entries = parse_srt(srt_content)
+    subtitles = []
+    for match in entries:
+        start_time = match.group(2)
+        end_time = match.group(3)
+        text = match.group(4).strip()
+        
+        # Convert SRT time format to seconds
+        start_seconds = time_to_seconds(start_time)
+        end_seconds = time_to_seconds(end_time)
+        
+        subtitles.append({
+            'start': start_seconds,
+            'end': end_seconds,
+            'text': text
+        })
+    return json.dumps(subtitles)
+
+def time_to_seconds(time_str):
+    """Convert SRT time format (HH:MM:SS,mmm) to seconds"""
+    h, m, s = time_str.replace(',', '.').split(':')
+    return float(h) * 3600 + float(m) * 60 + float(s)
+
+def display_video_with_subtitles(video_url, original_srt, translated_srt):
+    """Display video with both original and translated subtitles"""
+    # Create columns for video and subtitles
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        # Create a custom video player with subtitle overlay
+        st.markdown(f"""
+        <div style="position: relative; width: 100%;">
+            <iframe
+                id="youtube-player"
+                width="100%"
+                height="400"
+                src="{video_url.replace('watch?v=', 'embed/')}?enablejsapi=1"
+                frameborder="0"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowfullscreen
+            ></iframe>
+            <div id="subtitle-container" style="position: absolute; bottom: 60px; left: 0; right: 0; text-align: center; pointer-events: none;">
+                <div id="original-subtitle" style="background-color: rgba(0,0,0,0.7); color: white; padding: 5px 10px; margin: 0 auto; display: inline-block; max-width: 80%; border-radius: 5px; margin-bottom: 5px;"></div>
+                <div id="translated-subtitle" style="background-color: rgba(0,0,0,0.7); color: white; padding: 5px 10px; margin: 0 auto; display: inline-block; max-width: 80%; border-radius: 5px;"></div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Add JavaScript for subtitle synchronization
+        st.markdown(f"""
+        <script>
+            // Initialize YouTube API
+            var tag = document.createElement('script');
+            tag.src = "https://www.youtube.com/iframe_api";
+            var firstScriptTag = document.getElementsByTagName('script')[0];
+            firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+            var player;
+            var originalSubtitles = {create_subtitle_json(original_srt)};
+            var translatedSubtitles = {create_subtitle_json(translated_srt)};
+
+            function onYouTubeIframeAPIReady() {{
+                player = new YT.Player('youtube-player', {{
+                    events: {{
+                        'onStateChange': onPlayerStateChange,
+                        'onReady': onPlayerReady
+                    }}
+                }});
+            }}
+
+            function onPlayerReady(event) {{
+                console.log('Player ready');
+            }}
+
+            function onPlayerStateChange(event) {{
+                if (event.data == YT.PlayerState.PLAYING) {{
+                    setInterval(updateSubtitles, 100);
+                }}
+            }}
+
+            function updateSubtitles() {{
+                if (!player || !player.getCurrentTime) return;
+                
+                var currentTime = player.getCurrentTime();
+                var originalSubtitle = originalSubtitles.find(sub => 
+                    currentTime >= sub.start && currentTime <= sub.end
+                );
+                var translatedSubtitle = translatedSubtitles.find(sub => 
+                    currentTime >= sub.start && currentTime <= sub.end
+                );
+
+                document.getElementById('original-subtitle').textContent = originalSubtitle ? originalSubtitle.text : '';
+                document.getElementById('translated-subtitle').textContent = translatedSubtitle ? translatedSubtitle.text : '';
+            }}
+        </script>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown("### Subtitle Display")
+        st.markdown("---")
+        
+        # Add subtitle display controls
+        show_original = st.checkbox("Show Original Subtitles", value=True)
+        show_translated = st.checkbox("Show Translated Subtitles", value=True)
+        
+        # Add JavaScript to handle subtitle visibility
+        st.markdown(f"""
+        <script>
+            function updateSubtitleVisibility() {{
+                document.getElementById('original-subtitle').style.display = {str(show_original).lower()} ? 'inline-block' : 'none';
+                document.getElementById('translated-subtitle').style.display = {str(show_translated).lower()} ? 'inline-block' : 'none';
+            }}
+            updateSubtitleVisibility();
+        </script>
+        """, unsafe_allow_html=True)
+        
+        # Display subtitle files for download
+        st.markdown("### Download Subtitles")
+        st.download_button(
+            label="Download Original SRT",
+            data=original_srt,
+            file_name="original.srt",
+            mime="text/plain"
+        )
+        st.download_button(
+            label="Download Translated SRT",
+            data=translated_srt,
+            file_name="translated.srt",
+            mime="text/plain"
+        )
+
 # --- Streamlit UI ---
 st.set_page_config(page_title="Subtitle Translator", layout="wide")
 st.title("Subtitle Translator (EN → FR)")
@@ -464,8 +598,6 @@ if video_url and translator:
                 
                 if subtitle_path:
                     logger.debug(f"Successfully downloaded subtitles to: {subtitle_path}")
-                    # Display video directly from URL
-                    st.video(video_url)
                     
                     try:
                         # Read and convert subtitles
@@ -480,7 +612,14 @@ if video_url and translator:
                         with st.spinner("Translating subtitles..."):
                             translated_srt = translate_srt(srt_content, translator)
                         st.success("Translation complete!")
+                        
+                        # Display video with subtitles
+                        display_video_with_subtitles(video_url, srt_content, translated_srt)
+                        
+                        # Show side-by-side comparison
                         display_srt_side_by_side(srt_content, translated_srt)
+                        
+                        # Download button
                         st.download_button(
                             label="Download Translated SRT",
                             data=translated_srt,
