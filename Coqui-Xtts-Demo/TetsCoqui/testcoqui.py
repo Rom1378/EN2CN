@@ -5,7 +5,7 @@ from gradio_client import Client
 # Étape 1 : Appel au modèle Gradio
 client = Client("jimmyvu/Coqui-Xtts-Demo")
 result = client.predict(
-    input_text="Hi, I am a multilingual text-to-speech AI model.",
+    input_text="Hi, It's a test.",
     speaker_id="Aaron Dreschner",
     temperature=0.3,
     top_p=0.85,
