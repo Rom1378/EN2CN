@@ -11,6 +11,12 @@ import shutil
 import google.generativeai as genai
 from abc import ABC, abstractmethod
 import json
+from dotenv import load_dotenv
+from gemini_translator import GeminiTranslationService
+from subtitle_handler import download_subtitles, convert_srt_to_vtt, convert_vtt_to_srt, parse_srt
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -18,8 +24,31 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 MODEL = "llama3.2"
-LANGUAGE = "French"  # Target language
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
+
+# Available languages for translation
+LANGUAGES = {
+    "French": "French",
+    "Spanish": "Spanish",
+    "German": "German",
+    "Italian": "Italian",
+    "Portuguese": "Portuguese",
+    "Russian": "Russian",
+    "Japanese": "Japanese",
+    "Korean": "Korean",
+    "Chinese (Simplified)": "Chinese (Simplified)",
+    "Chinese (Traditional)": "Chinese (Traditional)",
+    "Arabic": "Arabic",
+    "Hindi": "Hindi",
+    "Dutch": "Dutch",
+    "Swedish": "Swedish",
+    "Polish": "Polish",
+    "Turkish": "Turkish",
+    "Vietnamese": "Vietnamese",
+    "Thai": "Thai",
+    "Indonesian": "Indonesian",
+    "Greek": "Greek"
+}
 
 # Translation Service Interface
 class TranslationService(ABC):
@@ -32,9 +61,10 @@ class TranslationService(ABC):
         pass
 
 class OllamaTranslationService(TranslationService):
-    def __init__(self, model_name: str):
+    def __init__(self, model_name: str, target_language: str):
         self.model_name = model_name
         self.api_url = OLLAMA_API_URL
+        self.target_language = target_language
 
     def is_available(self) -> bool:
         try:
@@ -59,7 +89,7 @@ class OllamaTranslationService(TranslationService):
         
         prompt = f"""You are translating subtitles for a video. This is subtitle #{index}.
 
-{context}Translate this English subtitle text to {LANGUAGE}:
+{context}Translate this English subtitle text to {self.target_language}:
     
 "{text}"
 
@@ -67,11 +97,10 @@ Instructions for SRT subtitle translation:
 - Return ONLY the translated text, nothing else
 - Maintain the same line breaks exactly as in the original
 - Keep the same formatting and style
-- Use formal language (vous in French)
+- Use formal language
 - Be concise - subtitles must be readable quickly
 - Preserve timing-appropriate phrasing
 - Maintain consistency with previous translations
-- Translate basketball terminology appropriately
 """
         logger.debug(f"Translation prompt: {prompt}")
 
@@ -107,8 +136,9 @@ Instructions for SRT subtitle translation:
         return text
 
 class GeminiTranslationService(TranslationService):
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, target_language: str):
         self.api_key = api_key
+        self.target_language = target_language
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel('gemini-2.0-flash')
 
@@ -133,7 +163,7 @@ class GeminiTranslationService(TranslationService):
         
         prompt = f"""You are translating subtitles for a video. This is subtitle #{index}.
 
-{context}Translate this English subtitle text to {LANGUAGE}:
+{context}Translate this English subtitle text to {self.target_language}:
     
 "{text}"
 
@@ -141,11 +171,10 @@ Instructions for SRT subtitle translation:
 - Return ONLY the translated text, nothing else
 - Maintain the same line breaks exactly as in the original
 - Keep the same formatting and style
-- Use formal language (vous in French)
+- Use formal language
 - Be concise - subtitles must be readable quickly
 - Preserve timing-appropriate phrasing
 - Maintain consistency with previous translations
-- Translate basketball terminology appropriately
 """
         logger.debug(f"Translation prompt: {prompt}")
 
@@ -373,6 +402,7 @@ def parse_srt(content):
     return entries
 
 def translate_srt(content, translator):
+    """Translate SRT content using the provided translator"""
     entries = parse_srt(content)
     result = []
     previous_text = None
@@ -381,7 +411,7 @@ def translate_srt(content, translator):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Group subtitles into batches of 5
+    # Group subtitles into batches of 10
     BATCH_SIZE = 10
     batches = []
     current_batch = []
@@ -415,21 +445,6 @@ def translate_srt(content, translator):
             f"Subtitle {entry['index']}:\n{entry['text']}"
             for entry in batch
         ])
-        
-        # Translate the batch
-        batch_prompt = f"""Translate these English subtitles to {LANGUAGE}. Each subtitle is numbered and should be translated separately:
-
-{batch_text}
-
-Instructions:
-- Return ONLY the translations, one per line
-- Keep the same numbering format
-- Maintain the same line breaks
-- Use formal language
-- Be concise
-- Preserve timing-appropriate phrasing
-- Maintain consistency
-"""
         
         try:
             batch_translation = translator.translate(batch_text, batch_idx, previous_text, previous_translation)
@@ -473,6 +488,7 @@ Instructions:
     return "\n".join(result)
 
 def display_srt_side_by_side(content, translated_content):
+    """Display original and translated subtitles side by side"""
     orig_entries = parse_srt(content)
     trans_entries = parse_srt(translated_content)
     st.subheader("Original vs Translated Subtitles")
@@ -508,45 +524,57 @@ def time_to_seconds(time_str):
     h, m, s = time_str.replace(',', '.').split(':')
     return float(h) * 3600 + float(m) * 60 + float(s)
 
-def display_video_with_subtitles(video_path, original_srt, translated_srt):
-    """Display video with both original and translated subtitles using Streamlit's native video player"""
-    # Create columns for video and subtitles
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        # Convert SRT to VTT format for the original subtitles
+def display_video_with_subtitles(video_path, original_subtitle_path, translated_subtitle_path, target_language):
+    """Display video with both original and translated subtitles"""
+    if not os.path.exists(video_path):
+        st.error("Video file not found!")
+        return
+
+    # Convert SRT subtitles to VTT format for both original and translated
+    if original_subtitle_path and os.path.exists(original_subtitle_path):
+        with open(original_subtitle_path, 'r', encoding='utf-8') as f:
+            original_srt = f.read()
         original_vtt = convert_srt_to_vtt(original_srt)
-        # Convert SRT to VTT format for the translated subtitles
+    else:
+        original_vtt = None
+
+    if translated_subtitle_path and os.path.exists(translated_subtitle_path):
+        with open(translated_subtitle_path, 'r', encoding='utf-8') as f:
+            translated_srt = f.read()
         translated_vtt = convert_srt_to_vtt(translated_srt)
-        
-        # Create subtitles dictionary for multiple tracks
-        # Put translated subtitles first so they appear as default
-        subtitles = {
-            f"Translated ({LANGUAGE})": translated_vtt,
-            "Original (English)": original_vtt
-        }
-        
-        # Display the video using Streamlit's video player with subtitles
-        st.video(video_path, subtitles=subtitles)
-    
+    else:
+        translated_vtt = None
+
+    # Create subtitles dictionary for Streamlit video player
+    subtitles = {}
+    if translated_vtt:
+        subtitles[f"Translated ({target_language})"] = translated_vtt
+    if original_vtt:
+        subtitles["Original (English)"] = original_vtt
+
+    # Display video with subtitles
+    st.video(video_path, subtitles=subtitles)
+
+    # Add download buttons for subtitle files
+    col1, col2 = st.columns(2)
+    with col1:
+        if translated_subtitle_path and os.path.exists(translated_subtitle_path):
+            with open(translated_subtitle_path, 'r', encoding='utf-8') as f:
+                st.download_button(
+                    label=f"Download {target_language} Subtitles",
+                    data=f.read(),
+                    file_name=f"translated_{target_language.lower()}.srt",
+                    mime="text/plain"
+                )
     with col2:
-        st.markdown("### Subtitle Display")
-        st.markdown("---")
-        
-        # Display subtitle files for download
-        st.markdown("### Download Subtitles")
-        st.download_button(
-            label=f"Download {LANGUAGE} SRT",
-            data=translated_srt,
-            file_name=f"translated_{LANGUAGE.lower()}.srt",
-            mime="text/plain"
-        )
-        st.download_button(
-            label="Download Original SRT",
-            data=original_srt,
-            file_name="original.srt",
-            mime="text/plain"
-        )
+        if original_subtitle_path and os.path.exists(original_subtitle_path):
+            with open(original_subtitle_path, 'r', encoding='utf-8') as f:
+                st.download_button(
+                    label="Download Original Subtitles",
+                    data=f.read(),
+                    file_name="original_english.srt",
+                    mime="text/plain"
+                )
 
 def convert_srt_to_vtt(srt_content):
     """Convert SRT format to VTT format"""
@@ -567,78 +595,90 @@ def convert_srt_to_vtt(srt_content):
     return vtt_content
 
 # --- Streamlit UI ---
-st.set_page_config(page_title="Subtitle Translator", layout="wide")
-st.title("Subtitle Translator (EN → FR)")
+def main():
+    st.set_page_config(page_title="Subtitle Translator", layout="wide")
+    st.title("Subtitle Translator")
+    st.write("Enter a video URL to automatically download and translate its subtitles.")
 
-st.write("Enter a video URL to automatically download and translate its subtitles to French.")
+    # Language selection
+    target_language = st.selectbox(
+        "Select Target Language",
+        options=list(LANGUAGES.keys()),
+        help="Choose the language to translate the subtitles to"
+    )
 
-# Translation service selection
-translation_service = st.radio(
-    "Select Translation Service",
-    ["Gemini API", "Ollama"],
-    help="Choose which translation service to use"
-)
+    # Initialize translation service
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        st.error("GEMINI_API_KEY not found in .env file. Please add your API key to the .env file.")
+        st.stop()
+    
+    try:
+        translator = GeminiTranslationService(
+            api_key=api_key,
+            target_language=LANGUAGES[target_language]
+        )
+    except Exception as e:
+        st.error(f"Failed to initialize translation service: {str(e)}")
+        st.stop()
 
-# Initialize translation service
-translator = None
-if translation_service == "Gemini API":
-    api_key = st.text_input("Enter your Gemini API key", type="password")
-    if api_key:
-        translator = GeminiTranslationService(api_key)
-elif translation_service == "Ollama":
-    translator = OllamaTranslationService(MODEL)
+    # Check if translation service is available
+    if not translator.is_available():
+        st.error("Translation service is not available. Please check your configuration.")
+        st.stop()
 
-# Check if selected translation service is available
-if translator and not translator.is_available():
-    st.error(f"{translation_service} is not available. Please check your configuration.")
-    st.stop()
+    video_url = st.text_input("Enter video URL", placeholder="https://www.youtube.com/watch?v=...")
 
-video_url = st.text_input("Enter video URL", placeholder="https://www.youtube.com/watch?v=...")
-
-if video_url and translator:
-    if st.button("Process Video and Translate Subtitles"):
-        try:
-            with st.spinner("Downloading video and subtitles..."):
-                logger.debug(f"Starting download for: {video_url}")
-                subtitle_path, video_path, video_info, temp_dir = download_subtitles(video_url)
-                
-                if subtitle_path and video_path:
-                    logger.debug(f"Successfully downloaded video and subtitles")
+    if video_url and translator:
+        if st.button("Process Video and Translate Subtitles"):
+            try:
+                with st.spinner("Downloading video and subtitles..."):
+                    logger.debug(f"Starting download for: {video_url}")
+                    subtitle_path, video_path, video_info, temp_dir = download_subtitles(video_url)
                     
-                    try:
-                        # Read and convert subtitles
-                        logger.debug("Reading subtitle file")
-                        with open(subtitle_path, 'r', encoding='utf-8') as f:
-                            vtt_content = f.read()
-                        logger.debug(f"Read {len(vtt_content)} characters from subtitle file")
+                    if subtitle_path and video_path:
+                        logger.debug(f"Successfully downloaded video and subtitles")
                         
-                        srt_content = convert_vtt_to_srt(vtt_content)
-                        logger.debug("Converted VTT to SRT format")
-                        
-                        with st.spinner("Translating subtitles..."):
-                            translated_srt = translate_srt(srt_content, translator)
-                        st.success("Translation complete!")
-                        
-                        # Display video with subtitles
-                        display_video_with_subtitles(video_path, srt_content, translated_srt)
-                        
-                        # Show side-by-side comparison
-                        display_srt_side_by_side(srt_content, translated_srt)
-                        
-                        # Download buttons
-                        st.download_button(
-                            label="Download Translated SRT",
-                            data=translated_srt,
-                            file_name="translated_fr.srt",
-                            mime="text/plain"
-                        )
-                    finally:
-                        # Clean up the temporary directory
-                        logger.debug(f"Cleaning up temporary directory: {temp_dir}")
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                else:
-                    logger.error("No subtitle path or video path returned from download_subtitles")
-                    st.error("Could not download video or subtitles. Please check the URL and try again.")
-        except Exception as e:
-            logger.error(f"Error in main process: {str(e)}", exc_info=True)
-            st.error(f"An error occurred: {str(e)}") 
+                        try:
+                            # Read and convert subtitles
+                            logger.debug("Reading subtitle file")
+                            with open(subtitle_path, 'r', encoding='utf-8') as f:
+                                vtt_content = f.read()
+                            logger.debug(f"Read {len(vtt_content)} characters from subtitle file")
+                            
+                            srt_content = convert_vtt_to_srt(vtt_content)
+                            logger.debug("Converted VTT to SRT format")
+                            
+                            with st.spinner("Translating subtitles..."):
+                                translated_srt = translate_srt(srt_content, translator)
+                            st.success("Translation complete!")
+                            
+                            # Save translated subtitles
+                            translated_subtitle_path = os.path.join(temp_dir, 'translated.srt')
+                            with open(translated_subtitle_path, 'w', encoding='utf-8') as f:
+                                f.write(translated_srt)
+                            
+                            # Display video with subtitles
+                            display_video_with_subtitles(
+                                video_path,
+                                subtitle_path,
+                                translated_subtitle_path,
+                                LANGUAGES[target_language]
+                            )
+                            
+                            # Show side-by-side comparison
+                            display_srt_side_by_side(srt_content, translated_srt)
+                            
+                        finally:
+                            # Clean up the temporary directory
+                            logger.debug(f"Cleaning up temporary directory: {temp_dir}")
+                            shutil.rmtree(temp_dir, ignore_errors=True)
+                    else:
+                        logger.error("No subtitle path or video path returned from download_subtitles")
+                        st.error("Could not download video or subtitles. Please check the URL and try again.")
+            except Exception as e:
+                logger.error(f"Error in main process: {str(e)}", exc_info=True)
+                st.error(f"An error occurred: {str(e)}")
+
+if __name__ == "__main__":
+    main() 
