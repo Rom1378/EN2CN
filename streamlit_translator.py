@@ -509,9 +509,10 @@ def display_video_with_subtitles(video_path, original_srt, translated_srt):
         translated_vtt = convert_srt_to_vtt(translated_srt)
         
         # Create subtitles dictionary for multiple tracks
+        # Put translated subtitles first so they appear as default
         subtitles = {
-            "Original": original_vtt,
-            "Translated": translated_vtt
+            f"Translated ({LANGUAGE})": translated_vtt,
+            "Original (English)": original_vtt
         }
         
         # Display the video using Streamlit's video player with subtitles
@@ -524,15 +525,15 @@ def display_video_with_subtitles(video_path, original_srt, translated_srt):
         # Display subtitle files for download
         st.markdown("### Download Subtitles")
         st.download_button(
-            label="Download Original SRT",
-            data=original_srt,
-            file_name="original.srt",
+            label=f"Download {LANGUAGE} SRT",
+            data=translated_srt,
+            file_name=f"translated_{LANGUAGE.lower()}.srt",
             mime="text/plain"
         )
         st.download_button(
-            label="Download Translated SRT",
-            data=translated_srt,
-            file_name="translated.srt",
+            label="Download Original SRT",
+            data=original_srt,
+            file_name="original.srt",
             mime="text/plain"
         )
 
