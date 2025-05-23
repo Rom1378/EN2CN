@@ -162,7 +162,15 @@ Instructions for SRT subtitle translation:
             logger.error(f"Translation error: {str(e)}")
             return text
 
-# --- Subtitle Download Logic ---
+def check_ffmpeg():
+    """Check if ffmpeg is installed"""
+    try:
+        import subprocess
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        return True
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return False
+
 def download_subtitles(url):
     """Download video and subtitles from URL using yt-dlp"""
     logger.debug(f"Starting download for URL: {url}")
@@ -179,24 +187,27 @@ def download_subtitles(url):
             formats = info.get('formats', [])
             logger.debug(f"Available formats: {[f.get('format_id') for f in formats]}")
             
-            # Find the best format that's available
+            # Find the best format that includes both video and audio
             best_format = None
             for f in formats:
-                if f.get('height', 0) <= 720 and f.get('vcodec', 'none') != 'none':
+                if (f.get('height', 0) <= 720 and 
+                    f.get('vcodec', 'none') != 'none' and 
+                    f.get('acodec', 'none') != 'none'):
                     best_format = f.get('format_id')
                     break
             
             if not best_format:
-                best_format = 'best'  # Fallback to best available format
+                # If no combined format found, try to get best video + best audio
+                best_format = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
         
         # First download the video
         video_opts = {
             'format': best_format,
             'merge_output_format': 'mp4',
             'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
-            'quiet': False,
-            'no_warnings': False,
-            'verbose': True,
+            'quiet': True,
+            'no_warnings': True,
+            'verbose': False,
         }
         
         logger.debug(f"Using format: {best_format}")
@@ -212,9 +223,9 @@ def download_subtitles(url):
             'subtitleslangs': ['en'],
             'skip_download': True,  # Skip video download since we already have it
             'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
-            'quiet': False,
-            'no_warnings': False,
-            'verbose': True,
+            'quiet': True,
+            'no_warnings': True,
+            'verbose': False,
         }
         
         logger.debug("Downloading subtitles...")
@@ -236,7 +247,7 @@ def download_subtitles(url):
         
         # Get the video file path
         video_path = os.path.join(temp_dir, 'video.mp4')
-        
+            
         # Get the subtitle file path
         subtitle_path = os.path.join(temp_dir, 'video.en.vtt')
         if not os.path.exists(subtitle_path):
