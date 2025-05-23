@@ -164,55 +164,100 @@ Instructions for SRT subtitle translation:
 
 # --- Subtitle Download Logic ---
 def download_subtitles(url):
-    """Download only subtitles from URL using yt-dlp"""
-    logger.debug(f"Starting subtitle download for URL: {url}")
+    """Download video and subtitles from URL using yt-dlp"""
+    logger.debug(f"Starting download for URL: {url}")
     
     # Create a permanent temporary directory
     temp_dir = tempfile.mkdtemp()
     logger.debug(f"Created temporary directory: {temp_dir}")
     
     try:
-        ydl_opts = {
+        # First, get available formats
+        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+            logger.debug("Getting available formats")
+            info = ydl.extract_info(url, download=False)
+            formats = info.get('formats', [])
+            logger.debug(f"Available formats: {[f.get('format_id') for f in formats]}")
+            
+            # Find the best format that's available
+            best_format = None
+            for f in formats:
+                if f.get('height', 0) <= 720 and f.get('vcodec', 'none') != 'none':
+                    best_format = f.get('format_id')
+                    break
+            
+            if not best_format:
+                best_format = 'best'  # Fallback to best available format
+        
+        # First download the video
+        video_opts = {
+            'format': best_format,
+            'merge_output_format': 'mp4',
+            'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
+            'quiet': False,
+            'no_warnings': False,
+            'verbose': True,
+        }
+        
+        logger.debug(f"Using format: {best_format}")
+        logger.debug("Downloading video...")
+        with yt_dlp.YoutubeDL(video_opts) as ydl:
+            video_info = ydl.extract_info(url, download=True)
+            logger.debug(f"Video downloaded: {video_info.get('title', 'Unknown title')}")
+        
+        # Then try to download subtitles separately
+        subtitle_opts = {
             'writesubtitles': True,
             'writeautomaticsub': True,
             'subtitleslangs': ['en'],
-            'skip_download': True,  # Don't download video
-            'outtmpl': os.path.join(temp_dir, 'subs.%(ext)s'),
-            'quiet': False,  # Enable yt-dlp output for debugging
-            'no_warnings': False,  # Show warnings for debugging
-            'verbose': True  # Enable verbose output
+            'skip_download': True,  # Skip video download since we already have it
+            'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
+            'quiet': False,
+            'no_warnings': False,
+            'verbose': True,
         }
         
-        logger.debug("Initializing yt-dlp with options")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            logger.debug("Extracting video info")
-            info = ydl.extract_info(url, download=True)
-            logger.debug(f"Video info extracted: {info.get('title', 'Unknown title')}")
-            
-            # Get the subtitle file path
-            subtitle_path = None
-            if 'subtitles' in info:
-                logger.debug(f"Available subtitles: {info['subtitles'].keys()}")
-                if 'en' in info['subtitles']:
-                    subtitle_path = os.path.join(temp_dir, f"subs.en.vtt")
-                    logger.debug(f"Found manual English subtitles at: {subtitle_path}")
-            elif 'automatic_captions' in info:
-                logger.debug(f"Available automatic captions: {info['automatic_captions'].keys()}")
-                if 'en' in info['automatic_captions']:
-                    subtitle_path = os.path.join(temp_dir, f"subs.en.vtt")
-                    logger.debug(f"Found automatic English captions at: {subtitle_path}")
-            
-            if subtitle_path and os.path.exists(subtitle_path):
+        logger.debug("Downloading subtitles...")
+        try:
+            with yt_dlp.YoutubeDL(subtitle_opts) as ydl:
+                sub_info = ydl.extract_info(url, download=True)
+                logger.debug("Subtitles downloaded successfully")
+        except Exception as e:
+            logger.warning(f"Error downloading subtitles: {str(e)}")
+            # Try alternative subtitle download method
+            try:
+                subtitle_opts['writeautomaticsub'] = False
+                with yt_dlp.YoutubeDL(subtitle_opts) as ydl:
+                    sub_info = ydl.extract_info(url, download=True)
+                    logger.debug("Subtitles downloaded with alternative method")
+            except Exception as e2:
+                logger.error(f"Failed to download subtitles with alternative method: {str(e2)}")
+                # Continue without subtitles
+        
+        # Get the video file path
+        video_path = os.path.join(temp_dir, 'video.mp4')
+        
+        # Get the subtitle file path
+        subtitle_path = os.path.join(temp_dir, 'video.en.vtt')
+        if not os.path.exists(subtitle_path):
+            subtitle_path = os.path.join(temp_dir, 'video.en.srt')
+        
+        if os.path.exists(video_path):
+            logger.debug(f"Video file exists at: {video_path}")
+            if os.path.exists(subtitle_path):
                 logger.debug(f"Subtitle file exists at: {subtitle_path}")
-                return subtitle_path, info, temp_dir
+                return subtitle_path, video_path, video_info, temp_dir
             else:
-                logger.error(f"Subtitle file not found at: {subtitle_path}")
-                logger.debug(f"Directory contents: {os.listdir(temp_dir)}")
-                return None, None, temp_dir
+                logger.warning("No subtitle file found, continuing with video only")
+                return None, video_path, video_info, temp_dir
+        else:
+            logger.error(f"Video file not found at: {video_path}")
+            logger.debug(f"Directory contents: {os.listdir(temp_dir)}")
+            return None, None, None, temp_dir
                 
     except Exception as e:
-        logger.error(f"Error downloading subtitles: {str(e)}", exc_info=True)
-        return None, None, temp_dir
+        logger.error(f"Error downloading video and subtitles: {str(e)}", exc_info=True)
+        return None, None, None, temp_dir
 
 def convert_vtt_to_srt(vtt_content):
     """Convert VTT format to SRT format"""
@@ -452,98 +497,29 @@ def time_to_seconds(time_str):
     h, m, s = time_str.replace(',', '.').split(':')
     return float(h) * 3600 + float(m) * 60 + float(s)
 
-def display_video_with_subtitles(video_url, original_srt, translated_srt):
-    """Display video with both original and translated subtitles"""
+def display_video_with_subtitles(video_path, original_srt, translated_srt):
+    """Display video with both original and translated subtitles using Streamlit's native video player"""
     # Create columns for video and subtitles
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        # Create a custom video player with subtitle overlay
-        st.markdown(f"""
-        <div style="position: relative; width: 100%;">
-            <iframe
-                id="youtube-player"
-                width="100%"
-                height="400"
-                src="{video_url.replace('watch?v=', 'embed/')}?enablejsapi=1"
-                frameborder="0"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowfullscreen
-            ></iframe>
-            <div id="subtitle-container" style="position: absolute; bottom: 60px; left: 0; right: 0; text-align: center; pointer-events: none;">
-                <div id="original-subtitle" style="background-color: rgba(0,0,0,0.7); color: white; padding: 5px 10px; margin: 0 auto; display: inline-block; max-width: 80%; border-radius: 5px; margin-bottom: 5px;"></div>
-                <div id="translated-subtitle" style="background-color: rgba(0,0,0,0.7); color: white; padding: 5px 10px; margin: 0 auto; display: inline-block; max-width: 80%; border-radius: 5px;"></div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        # Convert SRT to VTT format for the original subtitles
+        original_vtt = convert_srt_to_vtt(original_srt)
+        # Convert SRT to VTT format for the translated subtitles
+        translated_vtt = convert_srt_to_vtt(translated_srt)
         
-        # Add JavaScript for subtitle synchronization
-        st.markdown(f"""
-        <script>
-            // Initialize YouTube API
-            var tag = document.createElement('script');
-            tag.src = "https://www.youtube.com/iframe_api";
-            var firstScriptTag = document.getElementsByTagName('script')[0];
-            firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-
-            var player;
-            var originalSubtitles = {create_subtitle_json(original_srt)};
-            var translatedSubtitles = {create_subtitle_json(translated_srt)};
-
-            function onYouTubeIframeAPIReady() {{
-                player = new YT.Player('youtube-player', {{
-                    events: {{
-                        'onStateChange': onPlayerStateChange,
-                        'onReady': onPlayerReady
-                    }}
-                }});
-            }}
-
-            function onPlayerReady(event) {{
-                console.log('Player ready');
-            }}
-
-            function onPlayerStateChange(event) {{
-                if (event.data == YT.PlayerState.PLAYING) {{
-                    setInterval(updateSubtitles, 100);
-                }}
-            }}
-
-            function updateSubtitles() {{
-                if (!player || !player.getCurrentTime) return;
-                
-                var currentTime = player.getCurrentTime();
-                var originalSubtitle = originalSubtitles.find(sub => 
-                    currentTime >= sub.start && currentTime <= sub.end
-                );
-                var translatedSubtitle = translatedSubtitles.find(sub => 
-                    currentTime >= sub.start && currentTime <= sub.end
-                );
-
-                document.getElementById('original-subtitle').textContent = originalSubtitle ? originalSubtitle.text : '';
-                document.getElementById('translated-subtitle').textContent = translatedSubtitle ? translatedSubtitle.text : '';
-            }}
-        </script>
-        """, unsafe_allow_html=True)
+        # Create subtitles dictionary for multiple tracks
+        subtitles = {
+            "Original": original_vtt,
+            "Translated": translated_vtt
+        }
+        
+        # Display the video using Streamlit's video player with subtitles
+        st.video(video_path, subtitles=subtitles)
     
     with col2:
         st.markdown("### Subtitle Display")
         st.markdown("---")
-        
-        # Add subtitle display controls
-        show_original = st.checkbox("Show Original Subtitles", value=True)
-        show_translated = st.checkbox("Show Translated Subtitles", value=True)
-        
-        # Add JavaScript to handle subtitle visibility
-        st.markdown(f"""
-        <script>
-            function updateSubtitleVisibility() {{
-                document.getElementById('original-subtitle').style.display = {str(show_original).lower()} ? 'inline-block' : 'none';
-                document.getElementById('translated-subtitle').style.display = {str(show_translated).lower()} ? 'inline-block' : 'none';
-            }}
-            updateSubtitleVisibility();
-        </script>
-        """, unsafe_allow_html=True)
         
         # Display subtitle files for download
         st.markdown("### Download Subtitles")
@@ -559,6 +535,24 @@ def display_video_with_subtitles(video_url, original_srt, translated_srt):
             file_name="translated.srt",
             mime="text/plain"
         )
+
+def convert_srt_to_vtt(srt_content):
+    """Convert SRT format to VTT format"""
+    # Add VTT header
+    vtt_content = "WEBVTT\n\n"
+    
+    # Convert each subtitle entry
+    entries = parse_srt(srt_content)
+    for match in entries:
+        # Convert timestamp format from SRT to VTT
+        start_time = match.group(2).replace(',', '.')
+        end_time = match.group(3).replace(',', '.')
+        text = match.group(4).strip()
+        
+        # Add the entry to VTT content
+        vtt_content += f"{start_time} --> {end_time}\n{text}\n\n"
+    
+    return vtt_content
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="Subtitle Translator", layout="wide")
@@ -592,12 +586,12 @@ video_url = st.text_input("Enter video URL", placeholder="https://www.youtube.co
 if video_url and translator:
     if st.button("Process Video and Translate Subtitles"):
         try:
-            with st.spinner("Downloading subtitles..."):
-                logger.debug(f"Starting subtitle download for: {video_url}")
-                subtitle_path, video_info, temp_dir = download_subtitles(video_url)
+            with st.spinner("Downloading video and subtitles..."):
+                logger.debug(f"Starting download for: {video_url}")
+                subtitle_path, video_path, video_info, temp_dir = download_subtitles(video_url)
                 
-                if subtitle_path:
-                    logger.debug(f"Successfully downloaded subtitles to: {subtitle_path}")
+                if subtitle_path and video_path:
+                    logger.debug(f"Successfully downloaded video and subtitles")
                     
                     try:
                         # Read and convert subtitles
@@ -614,12 +608,12 @@ if video_url and translator:
                         st.success("Translation complete!")
                         
                         # Display video with subtitles
-                        display_video_with_subtitles(video_url, srt_content, translated_srt)
+                        display_video_with_subtitles(video_path, srt_content, translated_srt)
                         
                         # Show side-by-side comparison
                         display_srt_side_by_side(srt_content, translated_srt)
                         
-                        # Download button
+                        # Download buttons
                         st.download_button(
                             label="Download Translated SRT",
                             data=translated_srt,
@@ -631,8 +625,8 @@ if video_url and translator:
                         logger.debug(f"Cleaning up temporary directory: {temp_dir}")
                         shutil.rmtree(temp_dir, ignore_errors=True)
                 else:
-                    logger.error("No subtitle path returned from download_subtitles")
-                    st.error("Could not download subtitles. Please check the URL and try again.")
+                    logger.error("No subtitle path or video path returned from download_subtitles")
+                    st.error("Could not download video or subtitles. Please check the URL and try again.")
         except Exception as e:
             logger.error(f"Error in main process: {str(e)}", exc_info=True)
             st.error(f"An error occurred: {str(e)}") 
