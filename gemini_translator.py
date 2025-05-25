@@ -31,7 +31,7 @@ class GeminiTranslationService(TranslationService):
             
         self.target_language = target_language
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-pro')
+        self.model = genai.GenerativeModel('gemini-2.0-flash')
 
     def is_available(self) -> bool:
         try:
