@@ -201,76 +201,118 @@ def check_ffmpeg():
         return False
 
 def download_subtitles(url):
-    """Download video and subtitles from URL using yt-dlp"""
+    """Download video and subtitles from URL using yt-dlp with retries, cookies, and user-agent."""
     logger.debug(f"Starting download for URL: {url}")
     
-    # Create a permanent temporary directory
     temp_dir = tempfile.mkdtemp()
     logger.debug(f"Created temporary directory: {temp_dir}")
-    
+
+    # Options communes yt-dlp
+    common_opts = {
+        'cookiesfrombrowser': ('firefox',),
+        'user_agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                       'AppleWebKit/537.36 (KHTML, like Gecko) '
+                       'Chrome/115.0.0.0 Safari/537.36'),
+        'quiet': True,
+        'no_warnings': True,
+        'verbose': True,
+        'retries': 10,
+        'fragment_retries': 10,
+    }
+
     try:
-        # First, get available formats
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-            logger.debug("Getting available formats")
-            info = ydl.extract_info(url, download=False)
-            formats = info.get('formats', [])
-            logger.debug(f"Available formats: {[f.get('format_id') for f in formats]}")
-            
-        best_format = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+        # Récupérer les formats disponibles avec retries
+        for attempt in range(5):
+            try:
+                with yt_dlp.YoutubeDL({**common_opts, 'quiet': False}) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                break
+            except Exception as e:
+                logger.warning(f"Erreur extraction info (tentative {attempt+1}/5): {e}")
+                time.sleep(10)
+        else:
+            logger.error("Impossible d'extraire les infos de la vidéo après plusieurs tentatives")
+            return None, None, None, temp_dir
         
-        # First download the video
+        formats = info.get('formats', [])
+        logger.debug(f"Available formats: {[f.get('format_id') for f in formats]}")
+
+        # Choisir le meilleur format combiné <=720p
+        best_format = None
+        for f in formats:
+            height = f.get('height')
+            if (height is not None and height <= 720 and 
+                f.get('vcodec', 'none') != 'none' and 
+                f.get('acodec', 'none') != 'none'):
+                best_format = f.get('format_id')
+                break
+
+        if not best_format:
+            best_format = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+        logger.debug(f"Selected format: {best_format}")
+
+        # Télécharger la vidéo avec retries
         video_opts = {
+            **common_opts,
             'format': best_format,
             'merge_output_format': 'mp4',
             'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'verbose': False,
         }
-        
-        logger.debug(f"Using format: {best_format}")
-        logger.debug("Downloading video...")
-        with yt_dlp.YoutubeDL(video_opts) as ydl:
-            video_info = ydl.extract_info(url, download=True)
-            logger.debug(f"Video downloaded: {video_info.get('title', 'Unknown title')}")
-        
-        # Then try to download subtitles separately
+
+        for attempt in range(5):
+            try:
+                with yt_dlp.YoutubeDL(video_opts) as ydl:
+                    video_info = ydl.extract_info(url, download=True)
+                logger.debug(f"Video downloaded: {video_info.get('title', 'Unknown title')}")
+                break
+            except Exception as e:
+                logger.warning(f"Erreur téléchargement vidéo (tentative {attempt+1}/5): {e}")
+                time.sleep(10)
+        else:
+            logger.error("Échec téléchargement vidéo après plusieurs tentatives")
+            return None, None, None, temp_dir
+
+        # Télécharger les sous-titres avec retries
         subtitle_opts = {
+            **common_opts,
             'writesubtitles': True,
             'writeautomaticsub': True,
             'subtitleslangs': ['en'],
-            'skip_download': True,  # Skip video download since we already have it
+            'skip_download': True,
             'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'verbose': False,
         }
-        
-        logger.debug("Downloading subtitles...")
-        try:
-            with yt_dlp.YoutubeDL(subtitle_opts) as ydl:
-                sub_info = ydl.extract_info(url, download=True)
-                logger.debug("Subtitles downloaded successfully")
-        except Exception as e:
-            logger.warning(f"Error downloading subtitles: {str(e)}")
-            # Try alternative subtitle download method
+
+        for attempt in range(5):
             try:
-                subtitle_opts['writeautomaticsub'] = False
                 with yt_dlp.YoutubeDL(subtitle_opts) as ydl:
-                    sub_info = ydl.extract_info(url, download=True)
+                    ydl.extract_info(url, download=True)
+                logger.debug("Subtitles downloaded successfully")
+                break
+            except Exception as e:
+                logger.warning(f"Erreur téléchargement sous-titres (tentative {attempt+1}/5): {e}")
+                time.sleep(10)
+        else:
+            # Essayer sans sous-titres automatiques
+            subtitle_opts['writeautomaticsub'] = False
+            for attempt in range(5):
+                try:
+                    with yt_dlp.YoutubeDL(subtitle_opts) as ydl:
+                        ydl.extract_info(url, download=True)
                     logger.debug("Subtitles downloaded with alternative method")
-            except Exception as e2:
-                logger.error(f"Failed to download subtitles with alternative method: {str(e2)}")
-                # Continue without subtitles
-        
-        # Get the video file path
+                    break
+                except Exception as e2:
+                    logger.warning(f"Échec méthode alternative sous-titres (tentative {attempt+1}/5): {e2}")
+                    time.sleep(10)
+            else:
+                logger.error("Impossible de télécharger les sous-titres après plusieurs tentatives")
+                # On continue sans sous-titres
+
+        # Vérifier fichiers
         video_path = os.path.join(temp_dir, 'video.mp4')
-            
-        # Get the subtitle file path
         subtitle_path = os.path.join(temp_dir, 'video.en.vtt')
         if not os.path.exists(subtitle_path):
             subtitle_path = os.path.join(temp_dir, 'video.en.srt')
-        
+
         if os.path.exists(video_path):
             logger.debug(f"Video file exists at: {video_path}")
             if os.path.exists(subtitle_path):
@@ -283,10 +325,11 @@ def download_subtitles(url):
             logger.error(f"Video file not found at: {video_path}")
             logger.debug(f"Directory contents: {os.listdir(temp_dir)}")
             return None, None, None, temp_dir
-                
+
     except Exception as e:
-        logger.error(f"Error downloading video and subtitles: {str(e)}", exc_info=True)
+        logger.error(f"Error in download_subtitles: {str(e)}", exc_info=True)
         return None, None, None, temp_dir
+
 
 def convert_vtt_to_srt(vtt_content):
     """Convert VTT format to SRT format"""
