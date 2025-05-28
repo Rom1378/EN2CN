@@ -1,0 +1,40 @@
+1
+00:00:05,000 --> 00:00:08,000
+Enjoy coding!
+
+2
+00:00:10,000 --> 00:00:13,000
+Enjoy coding!
+
+3
+00:00:15,000 --> 00:00:18,000
+End of subtitles.
+
+4
+00:00:20,000 --> 00:00:23,000
+This is line number 4
+
+5
+00:00:25,000 --> 00:00:28,000
+Enjoy coding!
+
+6
+00:00:30,000 --> 00:00:33,000
+Python is great for TTS.
+
+7
+00:00:35,000 --> 00:00:38,000
+Testing subtitle generator.
+
+8
+00:00:40,000 --> 00:00:43,000
+Python is great for TTS.
+
+9
+00:00:45,000 --> 00:00:48,000
+This is a test.
+
+10
+00:00:50,000 --> 00:00:53,000
+Have a nice day!
+
