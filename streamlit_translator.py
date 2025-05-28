@@ -616,15 +616,7 @@ def main():
         st.error("Translation service is not available. Please check your configuration.")
         st.stop()
 
-    # Default video URL
-    DEFAULT_VIDEO_URL = "https://www.youtube.com/watch?v=E4WlUXrJgy4"
-    
-    video_url = st.text_input("Enter video URL", placeholder="https://www.youtube.com/watch?v=...", value=DEFAULT_VIDEO_URL)
-
-    # Use default URL if input is empty
-    if not video_url.strip():
-        video_url = DEFAULT_VIDEO_URL
-
+    video_url = st.text_input("Enter video URL", placeholder="https://www.youtube.com/watch?v=...")
 
     if video_url and translator:
         if st.button("Process Video and Translate Subtitles"):
