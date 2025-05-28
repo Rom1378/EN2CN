@@ -216,18 +216,7 @@ def download_subtitles(url):
             formats = info.get('formats', [])
             logger.debug(f"Available formats: {[f.get('format_id') for f in formats]}")
             
-            # Find the best format that includes both video and audio
-            best_format = None
-            for f in formats:
-                if (f.get('height', 0) <= 720 and 
-                    f.get('vcodec', 'none') != 'none' and 
-                    f.get('acodec', 'none') != 'none'):
-                    best_format = f.get('format_id')
-                    break
-            
-            if not best_format:
-                # If no combined format found, try to get best video + best audio
-                best_format = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+        best_format = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
         
         # First download the video
         video_opts = {
