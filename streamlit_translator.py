@@ -14,6 +14,7 @@ import json
 from dotenv import load_dotenv
 from gemini_translator import GeminiTranslationService
 from subtitle_handler import download_subtitles, convert_srt_to_vtt, convert_vtt_to_srt, parse_srt
+from TTS.api import TTS
 
 # Load environment variables
 load_dotenv()
@@ -49,6 +50,13 @@ LANGUAGES = {
     "Indonesian": "Indonesian",
     "Greek": "Greek"
 }
+
+@st.cache_resource
+def load_tts_model():
+    # Remplace par ton modèle exact
+    model = TTS(model_name="tts_models/multilingual/multi-dataset/your_tts", progress_bar=False, gpu=False)
+    return model
+
 
 # Translation Service Interface
 class TranslationService(ABC):
@@ -190,6 +198,7 @@ Instructions for SRT subtitle translation:
         except Exception as e:
             logger.error(f"Translation error: {str(e)}")
             return text
+        
 
 def check_ffmpeg():
     """Check if ffmpeg is installed"""
@@ -201,76 +210,118 @@ def check_ffmpeg():
         return False
 
 def download_subtitles(url):
-    """Download video and subtitles from URL using yt-dlp"""
+    """Download video and subtitles from URL using yt-dlp with retries, cookies, and user-agent."""
     logger.debug(f"Starting download for URL: {url}")
     
-    # Create a permanent temporary directory
     temp_dir = tempfile.mkdtemp()
     logger.debug(f"Created temporary directory: {temp_dir}")
-    
+
+    # Options communes yt-dlp
+    common_opts = {
+        'cookiesfrombrowser': ('firefox',),
+        'user_agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                       'AppleWebKit/537.36 (KHTML, like Gecko) '
+                       'Chrome/115.0.0.0 Safari/537.36'),
+        'quiet': True,
+        'no_warnings': True,
+        'verbose': True,
+        'retries': 10,
+        'fragment_retries': 10,
+    }
+
     try:
-        # First, get available formats
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-            logger.debug("Getting available formats")
-            info = ydl.extract_info(url, download=False)
-            formats = info.get('formats', [])
-            logger.debug(f"Available formats: {[f.get('format_id') for f in formats]}")
-            
-        best_format = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+        # Récupérer les formats disponibles avec retries
+        for attempt in range(5):
+            try:
+                with yt_dlp.YoutubeDL({**common_opts, 'quiet': False}) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                break
+            except Exception as e:
+                logger.warning(f"Erreur extraction info (tentative {attempt+1}/5): {e}")
+                time.sleep(10)
+        else:
+            logger.error("Impossible d'extraire les infos de la vidéo après plusieurs tentatives")
+            return None, None, None, temp_dir
         
-        # First download the video
+        formats = info.get('formats', [])
+        logger.debug(f"Available formats: {[f.get('format_id') for f in formats]}")
+
+        # Choisir le meilleur format combiné <=720p
+        best_format = None
+        for f in formats:
+            height = f.get('height')
+            if (height is not None and height <= 720 and 
+                f.get('vcodec', 'none') != 'none' and 
+                f.get('acodec', 'none') != 'none'):
+                best_format = f.get('format_id')
+                break
+
+        if not best_format:
+            best_format = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+        logger.debug(f"Selected format: {best_format}")
+
+        # Télécharger la vidéo avec retries
         video_opts = {
+            **common_opts,
             'format': best_format,
             'merge_output_format': 'mp4',
             'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'verbose': False,
         }
-        
-        logger.debug(f"Using format: {best_format}")
-        logger.debug("Downloading video...")
-        with yt_dlp.YoutubeDL(video_opts) as ydl:
-            video_info = ydl.extract_info(url, download=True)
-            logger.debug(f"Video downloaded: {video_info.get('title', 'Unknown title')}")
-        
-        # Then try to download subtitles separately
+
+        for attempt in range(5):
+            try:
+                with yt_dlp.YoutubeDL(video_opts) as ydl:
+                    video_info = ydl.extract_info(url, download=True)
+                logger.debug(f"Video downloaded: {video_info.get('title', 'Unknown title')}")
+                break
+            except Exception as e:
+                logger.warning(f"Erreur téléchargement vidéo (tentative {attempt+1}/5): {e}")
+                time.sleep(10)
+        else:
+            logger.error("Échec téléchargement vidéo après plusieurs tentatives")
+            return None, None, None, temp_dir
+
+        # Télécharger les sous-titres avec retries
         subtitle_opts = {
+            **common_opts,
             'writesubtitles': True,
             'writeautomaticsub': True,
             'subtitleslangs': ['en'],
-            'skip_download': True,  # Skip video download since we already have it
+            'skip_download': True,
             'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'verbose': False,
         }
-        
-        logger.debug("Downloading subtitles...")
-        try:
-            with yt_dlp.YoutubeDL(subtitle_opts) as ydl:
-                sub_info = ydl.extract_info(url, download=True)
-                logger.debug("Subtitles downloaded successfully")
-        except Exception as e:
-            logger.warning(f"Error downloading subtitles: {str(e)}")
-            # Try alternative subtitle download method
+
+        for attempt in range(5):
             try:
-                subtitle_opts['writeautomaticsub'] = False
                 with yt_dlp.YoutubeDL(subtitle_opts) as ydl:
-                    sub_info = ydl.extract_info(url, download=True)
+                    ydl.extract_info(url, download=True)
+                logger.debug("Subtitles downloaded successfully")
+                break
+            except Exception as e:
+                logger.warning(f"Erreur téléchargement sous-titres (tentative {attempt+1}/5): {e}")
+                time.sleep(10)
+        else:
+            # Essayer sans sous-titres automatiques
+            subtitle_opts['writeautomaticsub'] = False
+            for attempt in range(5):
+                try:
+                    with yt_dlp.YoutubeDL(subtitle_opts) as ydl:
+                        ydl.extract_info(url, download=True)
                     logger.debug("Subtitles downloaded with alternative method")
-            except Exception as e2:
-                logger.error(f"Failed to download subtitles with alternative method: {str(e2)}")
-                # Continue without subtitles
-        
-        # Get the video file path
+                    break
+                except Exception as e2:
+                    logger.warning(f"Échec méthode alternative sous-titres (tentative {attempt+1}/5): {e2}")
+                    time.sleep(10)
+            else:
+                logger.error("Impossible de télécharger les sous-titres après plusieurs tentatives")
+                # On continue sans sous-titres
+
+        # Vérifier fichiers
         video_path = os.path.join(temp_dir, 'video.mp4')
-            
-        # Get the subtitle file path
         subtitle_path = os.path.join(temp_dir, 'video.en.vtt')
         if not os.path.exists(subtitle_path):
             subtitle_path = os.path.join(temp_dir, 'video.en.srt')
-        
+
         if os.path.exists(video_path):
             logger.debug(f"Video file exists at: {video_path}")
             if os.path.exists(subtitle_path):
@@ -283,10 +334,11 @@ def download_subtitles(url):
             logger.error(f"Video file not found at: {video_path}")
             logger.debug(f"Directory contents: {os.listdir(temp_dir)}")
             return None, None, None, temp_dir
-                
+
     except Exception as e:
-        logger.error(f"Error downloading video and subtitles: {str(e)}", exc_info=True)
+        logger.error(f"Error in download_subtitles: {str(e)}", exc_info=True)
         return None, None, None, temp_dir
+
 
 def convert_vtt_to_srt(vtt_content):
     """Convert VTT format to SRT format"""
@@ -513,6 +565,56 @@ def time_to_seconds(time_str):
     h, m, s = time_str.replace(',', '.').split(':')
     return float(h) * 3600 + float(m) * 60 + float(s)
 
+def srt_to_text(srt_path):
+    with open(srt_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    # Supprimer les timestamps
+    content = re.sub(r'\d{2}:\d{2}:\d{2},\d{3}\s-->\s\d{2}:\d{2}:\d{2},\d{3}', '', content)
+
+    lines = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue  # skip empty lines
+        # Supprimer les compteurs ou étiquettes inutiles
+        if re.match(r'^\d+$', line):
+            continue  # ligne contenant uniquement un numéro
+        if re.match(r'^(Sous[- ]titre|Subtitle)\s*\d+', line, re.IGNORECASE):
+            continue  # ligne du type 'Sous-titre 1' ou 'Subtitle 2'
+        lines.append(line)
+
+    # Fusionner toutes les lignes
+    text = ' '.join(lines)
+
+    # Garder lettres accentuées, chiffres et ponctuation de base
+    text = re.sub(r"[^\w\s.,?!:;'\"-]", '', text, flags=re.UNICODE)
+
+    return text
+
+
+def text_to_audio_coqui(text, language="en"):
+    tts_model = load_tts_model()
+    output_path = os.path.join(os.getcwd(), "output.wav")  # dossier courant
+    
+    # Prendre le premier speaker s'il existe
+    speaker = tts_model.speakers[0] if hasattr(tts_model, 'speakers') and tts_model.speakers else None
+    
+    tts_model.tts_to_file(text=text, file_path=output_path, speaker=speaker, language=language)
+    return output_path
+
+
+
+def get_yourtts_lang_key(language: str) -> str | None:
+    mapping = {
+        "English": "en",
+        "French": "fr-fr",
+        "Portuguese": "pt-br"
+    }
+    return mapping.get(language, None)
+
+
+
 def display_video_with_subtitles(video_path, original_subtitle_path, translated_subtitle_path, target_language):
     """Display video with both original and translated subtitles"""
     if not os.path.exists(video_path):
@@ -589,19 +691,17 @@ def main():
     st.title("Subtitle Translator")
     st.write("Enter a video URL to automatically download and translate its subtitles.")
 
-    # Language selection
     target_language = st.selectbox(
         "Select Target Language",
         options=list(LANGUAGES.keys()),
         help="Choose the language to translate the subtitles to"
     )
 
-    # Initialize translation service
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         st.error("GEMINI_API_KEY not found in .env file. Please add your API key to the .env file.")
         st.stop()
-    
+
     try:
         translator = GeminiTranslationService(
             api_key=api_key,
@@ -611,63 +711,92 @@ def main():
         st.error(f"Failed to initialize translation service: {str(e)}")
         st.stop()
 
-    # Check if translation service is available
     if not translator.is_available():
         st.error("Translation service is not available. Please check your configuration.")
         st.stop()
 
     video_url = st.text_input("Enter video URL", placeholder="https://www.youtube.com/watch?v=...")
 
-    if video_url and translator:
-        if st.button("Process Video and Translate Subtitles"):
-            try:
-                with st.spinner("Downloading video and subtitles..."):
-                    logger.debug(f"Starting download for: {video_url}")
-                    subtitle_path, video_path, video_info, temp_dir = download_subtitles(video_url)
-                    
-                    if subtitle_path and video_path:
-                        logger.debug(f"Successfully downloaded video and subtitles")
-                        
-                        try:
-                            # Read and convert subtitles
-                            logger.debug("Reading subtitle file")
-                            with open(subtitle_path, 'r', encoding='utf-8') as f:
-                                vtt_content = f.read()
-                            logger.debug(f"Read {len(vtt_content)} characters from subtitle file")
-                            
-                            srt_content = convert_vtt_to_srt(vtt_content)
-                            logger.debug("Converted VTT to SRT format")
-                            
-                            with st.spinner("Translating subtitles..."):
-                                translated_srt = translate_srt(srt_content, translator)
-                            st.success("Translation complete!")
-                            
-                            # Save translated subtitles
-                            translated_subtitle_path = os.path.join(temp_dir, 'translated.srt')
-                            with open(translated_subtitle_path, 'w', encoding='utf-8') as f:
-                                f.write(translated_srt)
-                            
-                            # Display video with subtitles
-                            display_video_with_subtitles(
-                                video_path,
-                                subtitle_path,
-                                translated_subtitle_path,
-                                LANGUAGES[target_language]
-                            )
-                            
-                            # Show side-by-side comparison
-                            display_srt_side_by_side(srt_content, translated_srt)
-                            
-                        finally:
-                            # Clean up the temporary directory
-                            logger.debug(f"Cleaning up temporary directory: {temp_dir}")
-                            shutil.rmtree(temp_dir, ignore_errors=True)
-                    else:
-                        logger.error("No subtitle path or video path returned from download_subtitles")
-                        st.error("Could not download video or subtitles. Please check the URL and try again.")
-            except Exception as e:
-                logger.error(f"Error in main process: {str(e)}", exc_info=True)
-                st.error(f"An error occurred: {str(e)}")
+    # Debug info
+    logger.debug(f"video_url: {video_url}")
+    logger.debug(f"target_language: {target_language}")
+
+    # Bouton pour lancer le traitement (download + traduction + TTS)
+    if st.button("Process Video and Translate Subtitles"):
+        try:
+            with st.spinner("Downloading video and subtitles..."):
+                logger.debug(f"Starting download for: {video_url}")
+                subtitle_path, video_path, video_info, temp_dir = download_subtitles(video_url)
+
+                if subtitle_path and video_path:
+                    logger.debug(f"Successfully downloaded video and subtitles")
+
+                    logger.debug("Reading subtitle file")
+                    with open(subtitle_path, 'r', encoding='utf-8') as f:
+                        vtt_content = f.read()
+                    logger.debug(f"Read {len(vtt_content)} characters from subtitle file")
+
+                    srt_content = convert_vtt_to_srt(vtt_content)
+                    logger.debug("Converted VTT to SRT format")
+
+                    with st.spinner("Translating subtitles..."):
+                        translated_srt = translate_srt(srt_content, translator)
+                    st.success("Translation complete!")
+
+                    # Sauvegarde des fichiers dans dossier temporaire
+                    translated_subtitle_path = os.path.join(temp_dir, 'translated.srt')
+                    with open(translated_subtitle_path, 'w', encoding='utf-8') as f:
+                        f.write(translated_srt)
+
+                    # Stockage dans session_state pour réutilisation
+                    st.session_state['temp_dir'] = temp_dir
+                    st.session_state['video_path'] = video_path
+                    st.session_state['subtitle_path'] = subtitle_path
+                    st.session_state['translated_subtitle_path'] = translated_subtitle_path
+                    st.session_state['srt_content'] = srt_content
+                    st.session_state['translated_srt'] = translated_srt
+
+                    logger.debug("Starting TTS conversion")
+                    texte_traduit = srt_to_text(translated_subtitle_path)
+                    st.text_area("Texte envoyé au TTS", texte_traduit, height=300)
+                    logger.debug(f"Texte envoyé au TTS (longueur: {len(texte_traduit)}):\n{texte_traduit}")
+                    logger.debug(f"langue {target_language}")
+                    tts_lang = get_yourtts_lang_key(target_language)
+                    audio_path = text_to_audio_coqui(texte_traduit,tts_lang)
+                    st.session_state['audio_path'] = audio_path
+                    logger.debug(f"TTS audio saved at {audio_path}")
+
+                else:
+                    logger.error("No subtitle path or video path returned from download_subtitles")
+                    st.error("Could not download video or subtitles. Please check the URL and try again.")
+
+        except Exception as e:
+            logger.error(f"Error in main process: {str(e)}", exc_info=True)
+            st.error(f"An error occurred: {str(e)}")
+
+    # Affichage des options et vidéos uniquement si on a déjà traité une vidéo
+    if all(k in st.session_state for k in ['video_path', 'subtitle_path', 'translated_subtitle_path', 'audio_path']):
+        playback_mode = st.radio(
+            "Choisir le mode de lecture",
+            ("Vidéo avec sous-titres et audio original", "Vidéo muette + audio TTS traduit")
+        )
+        if playback_mode == "Vidéo avec sous-titres et audio original":
+            logger.debug("Playback mode: Video + subtitles + original audio")
+            display_video_with_subtitles(
+                st.session_state['video_path'],
+                st.session_state['subtitle_path'],
+                st.session_state['translated_subtitle_path'],
+                LANGUAGES[target_language]
+            )
+        else:
+            logger.debug("Playback mode: Muted video + TTS audio")
+            st.video(st.session_state['video_path'], muted=True)
+            st.audio(st.session_state['audio_path'])
+
+        display_srt_side_by_side(st.session_state['srt_content'], st.session_state['translated_srt'])
+
+    else:
+        logger.debug("No processed video found in session_state")
 
 if __name__ == "__main__":
-    main() 
+    main()
